@@ -1,0 +1,14 @@
+{
+  "name": "nodejs-upgrade-functions",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@octokit/core": "^3.1.2",
+    "aws-sdk": "^2.721.0",
+    "base-64": "^0.1.0",
+    "jsonwebtoken": "^8.5.1",
+    "jwk-to-pem": "^2.0.4",
+    "node-fetch": "^2.6.0",
+    "utf8": "^3.0.0"
+  }
+}
