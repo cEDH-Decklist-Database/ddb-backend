@@ -727,7 +727,7 @@ function generateDeck(info, curator = null) {
   if (curator) {
     deck.id = valid.text(info.id, "If you see this, contact AverageDragon.", v.length.medium);
     deck.comments = info.comments ? valid.text(info.comments, "Curator Comments", v.length.long) : "";
-    deck.recommended = valid.boolean(info.recommended);
+    deck.recommended = false;
     deck.status = valid.status(info.status);
     deck.destination = valid.destination(info.destination);
     deck.editor = curator.username;
