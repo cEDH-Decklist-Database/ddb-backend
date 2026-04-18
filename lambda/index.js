@@ -1,20 +1,14 @@
 'use strict';
 
-const fetch = require('node-fetch');
-const { Octokit } = require("@octokit/core");
 const AWS = require('aws-sdk');
 const jsonwebtoken = require('jsonwebtoken');
 const jwkToPem = require('jwk-to-pem');
-const utf8 = require('utf8');
-const base64 = require('base-64');
 
 const dynamo = new AWS.DynamoDB.DocumentClient();
 
-// Constant variable declarations
-const cognitoKeysURL = "REDACTED";
+const cognitoKeysURL = process.env.COGNITO_KEYS_URL;
 const reCaptchaURL = "https://recaptcha.google.com/recaptcha/api/siteverify";
-const reCaptchaSecret = "REDACTED";
-const githubToken = "REDACTED";
+const reCaptchaSecret = process.env.RECAPTCHA_SECRET;
 
 /**
  * The cEDH Decklist Database API, meant for handling submissions and edits
@@ -117,21 +111,6 @@ async function handleConsole(body) {
       fields = hasFields(body, ["data", "timestamp"]);
       if (!fields.success) { return fields.complete }
       return await console.updateDeck(body.data, body.timestamp, user);
-      break;
-    case "PUBLISH_CHANGES":
-      fields = hasFields(body, ["changes"]);
-      if (!fields.success) { return fields.complete }
-      return await console.publishChanges(user, body.changes);
-      break;
-    case "MODIFY_SITE":
-      fields = hasFields(body, ["file", "content"]);
-      if (!fields.success) { return fields.complete }
-      return await console.modifySite(body.file, body.content, user);
-      break;
-    case "UPDATE_CHANGELOG":
-      fields = hasFields(body, ["file", "date", "title", "content"]);
-      if (!fields.success) { return fields.complete }
-      return await console.updateChangelog(body.file, body.date, body.title, body.content, user);
       break;
     default:
         return complete(400, "Invalid method name.");
@@ -264,178 +243,6 @@ const console = {
     } catch (error) {
       return complete(500, error.message);
     }
-  },
-  
-  publishChanges: async function(curator, changes) {
-    try {
-      const update = await checkUpdate("database");
-      const cooldown = (Date.now() - update.timestamp);
-      if (cooldown < 30000) {
-        const minutes = Math.floor(((30000 - cooldown) / 6000)) / 10;
-        return complete(403, "There has already been an update recently, which was initiated by " + update.user + ". Publishing will be available in " + minutes + " minutes");
-      }
-      
-      await setUpdate(true, "database", curator);
-      
-      const file = "https://raw.githubusercontent.com/AverageDragon/cEDH-Decklist-Database/master/_data/database.json";
-      const data = await fetch(file).then(v => { return v.json() });
-      
-      var batchKeys = [];
-      JSON.parse(changes).forEach(deckId => batchKeys.push({ "id": deckId }));
-      
-      
-      
-      var safety = 0;
-      let batches = [];
-      
-      do {
-        safety = safety + 1;
-        if (safety > 50) {
-          return complete(500, "Too many batchGetItems iterations - please don't bankrupt me.");
-        }
-        
-        let sliceBatchKeys = batchKeys.slice(0, 20);
-        batchKeys.splice(0, 20);
-        let batchParams = {
-          "RequestItems": {
-            "Decks": {
-              Keys: sliceBatchKeys
-            }
-          }
-        }
-        
-        let batch = await dynamo.batchGet(batchParams).promise();
-        batches.push(batch);
-        
-      } while (batchKeys.length > 0);
-      
-      const deckSet = {};
-      data.forEach(deck => { deckSet[deck.id] = deck; });
-      
-      const promises = [];
-      for (let i = 0; i < batches.length; i++) {
-        let thisBatch = batches[i];
-        if (typeof thisBatch["Responses"] == "undefined") {
-          break;
-        }
-        thisBatch["Responses"]["Decks"].forEach(item => {
-          const value = item.destination ? item.destination : item.status;
-          let attributeValues = { ":null": null, ":value": value };
-          let updateExpression = "SET #dstatus = :value, #ddest = :null";
-          
-          if (value === "DELETED") {
-            updateExpression = updateExpression + ", #dttl = :ttl";
-            attributeValues[":ttl"] = Math.floor(Date.now()/1000) + 604800;
-            delete deckSet[item.id];
-          } else {
-            updateExpression = updateExpression + ", #dttl = :null";
-          }
-          const updateParams = {
-            TableName: "Decks",
-            Key: { id: item.id },
-            ExpressionAttributeValues: attributeValues,
-            ExpressionAttributeNames: { "#dstatus": "status", "#ddest": "destination", "#dttl": "ttl" },
-            UpdateExpression: updateExpression
-          }
-          promises.push(dynamo.update(updateParams).promise());
-          if (item.destination === "PUBLISHED" || (item.status === "PUBLISHED" && !item.destination)) {
-            delete item.comments;
-            delete item.editor;
-            delete item.status;
-            delete item.destination;
-            delete item.ttl;
-            deckSet[item.id] = item;
-          }
-        });
-      }
-      
-      
-      await Promise.all(promises);
-      await alterGithub(true, "_data/database.json", curator.username + " published database changes", utf8.encode(JSON.stringify(Object.values(deckSet))));
-      
-      await setUpdate(false, "database", curator);
-      return complete(200, "Successfully updated the database.");
-    } catch (error) {
-      await setUpdate(false, "database", curator);
-      return complete(500, error.message);
-    }
-  },
-  
-  modifySite: async function(file, content, curator) {
-    const files = {
-      "MOTD": "motd.md",
-      "ABOUT": "about.md",
-      "TEMPLATE": "template.md",
-      "SUBMIT": "submit.md",
-      "REQUEST": "request.md",
-      "COMPETITIVE": "tables/competitive.md",
-      "BREW": "tables/brew.md",
-      "DEPRECATED": "tables/deprecated.md",
-      "MEME": "tables/meme.md"
-    };
-    if (!Object.keys(files).includes(file)) {
-      return complete(404, "Invalid file name.");
-    }
-    try {
-      const update = await checkUpdate(file);
-      const cooldown = (Date.now() - update.timestamp);
-      if (cooldown < 1800000) {
-        const minutes = Math.floor(((1800000 - cooldown) / 6000)) / 10;
-        return complete(403, "This file has been updated recently by " + update.user + ". This file can be edited again in " + minutes + " minutes");
-      }
-      
-      await setUpdate(true, file, curator);
-      
-      const decoded = base64.decode(content);
-      if (decoded.length > 100000) {
-        throw new Error("That file is too long. Please be careful about breaking the site.");
-      }
-      const message = curator.username + " updated " + files[file];
-      await alterGithub(true, "_includes/markdown/" + files[file], message, decoded);
-      
-      await setUpdate(false, file, curator);
-      return complete(200, "Successfully updated the " + file + " file!");
-    } catch (error) {
-      await setUpdate(false, file, curator);
-      return complete(500, error.message);
-    }
-  },
-  
-  updateChangelog: async function(file, date, title, content, curator) {
-    try {
-      const update = await checkUpdate("changelog");
-      const cooldown = (Date.now() - update.timestamp);
-      if (cooldown < 1800000) {
-        const minutes = Math.floor(((1800000 - cooldown) / 6000)) / 10;
-        return complete(403, "The changelog has been edited recently by " + update.curator + ". It can be edited again in " + minutes + " minutes");
-      }
-      
-      await setUpdate(true, "changelog", curator);
-      
-      const markdown = base64.decode(content);
-      const updateTitle = base64.decode(title);
-      const filename = file === "new" ? "u" + new Date().getTime() : file;
-      const filedate = file === "new" ? new Date().toISOString() : date;
-      const oldFile = file !== "new";
-      
-      
-      if (markdown.length > 100000 || updateTitle.length > 100) {
-        throw new Error("Your input is too long. Please be careful about breaking the site.");
-      }
-      
-      const fullChangelog = "---\ntitle: " 
-                            + updateTitle + "\nfilename: " 
-                            + filename + "\ndate: "
-                            + filedate + "\n---\n" + markdown;
-      const message = curator.username + " updated changelog " + updateTitle;
-      await alterGithub(oldFile, "_includes/markdown/_updates/" + filename + ".md", message, fullChangelog);
-      
-      await setUpdate(false, "changelog", curator);
-      return complete(200, "Successfully updated the changelog entry for " + updateTitle + "!");
-    } catch (error) {
-      await setUpdate(false, "changelog", curator);
-      return complete(500, error.message);
-    }
   }
 }
 
@@ -468,43 +275,6 @@ async function checkUpdate(key) {
   }).promise();
   
   return update.Item;
-}
-
-async function setUpdate(active, key, user) {
-  const update = {
-    id: key,
-    active: active,
-    timestamp: Date.now(),
-    user: user.username
-  };
-  
-  await dynamo.put({ TableName: "Update", Item: update }).promise();
-}
-
-/*
- * update: Boolean indicating if this is a new file or updating a file
- * path: Path to the file which is being altered
- * message: The commit message which will appear on Github
- * content: The acutal file contents which will be put on github, as a string
- */
-async function alterGithub(update, path, message, content) {
-  const octokit = new Octokit({ auth: githubToken });
-  
-  const parameters = {
-    owner: "AverageDragon",
-    repo: "cEDH-Decklist-Database",
-    path: path
-  }
-  
-  if (update) {
-    parameters.sha = await octokit.request("GET /repos/{owner}/{repo}/contents/{path}", parameters)
-      .then(v => v.data.sha);
-  }
-  
-  parameters.message = message;
-  parameters.content = Buffer.from(content, 'binary').toString('base64');
-  
-  const result = await octokit.request("PUT /repos/{owner}/{repo}/contents/{path}", parameters);
 }
 
 // Checks that the object has the required fields
