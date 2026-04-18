@@ -540,7 +540,7 @@ function generateID() {
 function generateDeck(info, curator = null) {
   let deck = {};
   if (curator) {
-    deck.id = valid.text(info.id, "If you see this, contact AverageDragon.", v.length.medium);
+    deck.id = valid.text(info.id, "If you see this, contact a curator on Discord.", v.length.medium);
     deck.comments = info.comments ? valid.text(info.comments, "Curator Comments", v.length.long) : "";
     deck.recommended = false;
     deck.status = valid.status(info.status);
