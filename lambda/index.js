@@ -112,6 +112,11 @@ async function handleConsole(body) {
       if (!fields.success) { return fields.complete }
       return await console.updateDeck(body.data, body.timestamp, user);
       break;
+    case "DELETE_OLD_SUBMISSIONS":
+      fields = hasFields(body, ["cutoff"]);
+      if (!fields.success) { return fields.complete }
+      return await console.deleteOldSubmissions(body.cutoff);
+      break;
     default:
         return complete(400, "Invalid method name.");
   }
@@ -240,6 +245,46 @@ const console = {
       const putResult = await dynamo.put({ TableName: "Decks", Item: deck }).promise();
       
       return complete(200, "Successfully updated the deck", putResult.Item);
+    } catch (error) {
+      return complete(500, error.message);
+    }
+  },
+
+  deleteOldSubmissions: async function(cutoff) {
+    try {
+      if (typeof cutoff !== "string" || isNaN(Date.parse(cutoff))) {
+        return complete(400, "Invalid cutoff date.");
+      }
+      const params = {
+        TableName: "Decks",
+        FilterExpression: "#s = :submitted AND updated < :cutoff",
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: { ":submitted": "SUBMITTED", ":cutoff": cutoff }
+      };
+      const matching = [];
+      let items;
+      let safety = 0;
+      do {
+        safety++;
+        if (safety > 50) {
+          return complete(500, "Too many scan iterations - please don't bankrupt me.");
+        }
+        items = await dynamo.scan(params).promise();
+        items.Items.forEach(i => matching.push(i));
+        params.ExclusiveStartKey = items.LastEvaluatedKey;
+      } while (typeof items.LastEvaluatedKey !== "undefined");
+
+      const total = matching.length;
+      while (matching.length > 0) {
+        const chunk = matching.splice(0, 25);
+        await dynamo.batchWrite({
+          RequestItems: {
+            "Decks": chunk.map(i => ({ DeleteRequest: { Key: { id: i.id } } }))
+          }
+        }).promise();
+      }
+
+      return complete(200, "Deleted " + total + " old submission(s).", { count: total });
     } catch (error) {
       return complete(500, error.message);
     }
